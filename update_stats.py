@@ -1,106 +1,3 @@
-#!/usr/bin/env python3
-"""Refresh the original SVG dashboard with live GitHub data for ArunAura."""
-import json, os, re, urllib.request, urllib.error
-import re
-from datetime import datetime, timezone
-from pathlib import Path
-
-USER = os.getenv("GITHUB_USERNAME", "ArunAura")
-TOKEN = os.getenv("GH_STATS_TOKEN") or os.getenv("GITHUB_TOKEN")
-ROOT = Path(__file__).resolve().parent
-TEMPLATE = ROOT / "stats-template.svg"
-OUTPUT = ROOT / "github-stats.svg"
-
-if not TOKEN:
-    raise SystemExit("Missing GH_STATS_TOKEN secret. See README.md.")
-
-def request(url, method="GET", data=None):
-    body = json.dumps(data).encode() if data is not None else None
-    req = urllib.request.Request(url, data=body, method=method, headers={
-        "Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json",
-        "User-Agent": "ArunAura-live-stats"
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return json.loads(response.read().decode())
-    except urllib.error.HTTPError as e:
-        detail=e.read().decode(errors="replace")
-        raise RuntimeError(f"GitHub API returned HTTP {e.code}: {detail[:500]}") from e
-
-def graph(query, variables=None):
-    result=request("https://api.github.com/graphql", "POST", {"query":query,"variables":variables or {}})
-    if result.get("errors"):
-        raise RuntimeError("GitHub GraphQL error: " + json.dumps(result["errors"])[:1000])
-    return result["data"]
-
-def xml_escape(s):
-    return str(s).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
-
-def replace_text(svg, old, new, count=1):
-    # Replace only visible text nodes, preserving the original SVG markup and animation.
-    pattern = r'(?<=>)' + re.escape(str(old)) + r'(?=</text>)'
-    result, n = re.subn(pattern, lambda _: xml_escape(new), svg, count=count)
-    if n == 0:
-        print(f"Warning: couldn't find SVG text value {old!r}")
-    return result
-
-def replace_first(pattern, repl, svg):
-    result,n=re.subn(pattern,repl,svg,count=1)
-    if not n: print(f"Warning: SVG pattern not found: {pattern[:80]}")
-    return result
-
-# Basic public profile and repository metrics
-profile=request(f"https://api.github.com/users/{USER}")
-repos=[]
-page=1
-while True:
-    batch=request(f"https://api.github.com/users/{USER}/repos?per_page=100&page={page}&type=owner&sort=updated")
-    if not batch: break
-    repos.extend(r for r in batch if not r.get("fork") and not r.get("archived"))
-    if len(batch)<100: break
-    page+=1
-public_repos = profile.get("public_repos") or len(repos)
-stars=sum(r.get("stargazers_count",0) for r in repos)
-followers=profile.get("followers",0)
-
-# Contribution calendar, weekday totals, current streak and longest streak
-
-query = f'''query {{
-  user(login: "{USER}") {{
-    contributionsCollection {{
-      contributionCalendar {{
-        totalContributions
-        weeks {{
-          contributionDays {{
-            contributionCount
-            date
-            weekday
-          }}
-        }}
-      }}
-    }}
-  }}
-}}'''
-data = graph(query)
-
-data=graph(query,{"login":USER})
-user=data.get("user")
-if not user: raise RuntimeError(f"GitHub user {USER!r} was not found or isn't visible to this token.")
-calendar=user["contributionsCollection"]["contributionCalendar"]
-total_contrib=calendar["totalContributions"]
-days=[day for week in calendar["weeks"] for day in week["contributionDays"]]
-# GitHub weekday enum: Sunday=0 ... Saturday=6; dashboard labels Monday first.
-weekday_names=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
-weekday_counts=[sum(d["contributionCount"] for d in days if d["weekday"]==i) for i in [1,2,3,4,5,6,0]]
-most_active=weekday_names[max(range(7),key=lambda i:weekday_counts[i])] if any(weekday_counts) else "—"
-# Streaks based on days with at least one contribution; include today if active, otherwise count from yesterday.
-by_date={d["date"]:d["contributionCount"] for d in days}
-today=datetime.now(timezone.utc).date()
-from datetime import timedelta
-current=0
-cursor=today
-if by_date.get(cursor.isoformat(),0)==0: cursor-=timedelta(days=1)
 while by_date.get(cursor.isoformat(),0)>0:
     current+=1; cursor-=timedelta(days=1)
 longest=0; run=0; best_start=best_end=None; run_start=None
@@ -141,22 +38,18 @@ def fmt_bytes(n):
     return str(n)
 
 svg=TEMPLATE.read_text()
-svg=replace_text(svg,"232",total_contrib)
-svg=replace_text(svg,"0",current,1)
-svg=replace_text(svg,"8",longest,1)
-svg=replace_text(svg,"Oct 2 - Oct 9",longest_label)
-svg=replace_text(svg,"most active: Sun",f"most active: {most_active}")
-svg=replace_text(svg,"21",len(repos))
-svg=replace_text(svg,"608K",fmt_bytes(sum(code_lang.values())))
-svg = re.sub(
-    r'(<text class="num" x="300" y="602"[^>]*>).*?(</text>)',
-    lambda m: m.group(1) + str(public_repos) + m.group(2),
-    svg,
-    count=1
-)
-svg=replace_text(svg,"126",stars)
-svg=replace_text(svg,"52",followers)
-svg=replace_text(svg,"live from GitHub - updates every day",f"@{USER} - refreshed {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+# Update summary metrics by their unique SVG coordinates (never by global placeholder text).
+svg=replace_at(svg, "108", "168", total_contrib, "big")
+svg=replace_at(svg, "264", "171", current)
+svg=replace_at(svg, "420", "168", longest, "big")
+svg=replace_at(svg, "420", "222", longest_label, "sm")
+svg=replace_at(svg, "948", "95", f"most active: {most_active}", "sm")
+svg=replace_at(svg, "136", "448", len(repos))
+svg=replace_at(svg, "624", "448", fmt_bytes(sum(code_lang.values())))
+svg=replace_at(svg, "300", "602", public_repos, "num")
+svg=replace_at(svg, "624", "602", stars, "num")
+svg=replace_at(svg, "948", "602", followers, "num")
+svg=replace_at(svg, "972", "42", f"@{USER} - refreshed {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", "sm")
 
 # Update the weekday bar heights and labels while retaining the original positions/colors/animations.
 maxv=max(weekday_counts) or 1
@@ -177,7 +70,13 @@ for i,(label,value) in enumerate(zip(weekday_names,weekday_counts)):
         chunk=svg[start:end]
         chunk=re.sub(r'(<animate attributeName="y" values="232;232;)[^"]+',lambda m:m.group(1)+str(y),chunk,count=1)
         svg=svg[:start]+chunk+svg[end:]
-    svg=replace_text(svg,["36","22","10","32","42","14","76"][i],value,1)
+    # Put the count above its own bar and update it by x-coordinate; don't globally replace repeated numbers.
+    label_x = f"{563+62*i:.1f}"
+    label_y = max(124, round(y-8, 1))
+    pattern = rf'(<text class="num" x="{label_x}" y=")[^"]+(" text-anchor="middle" fill="#[0-9a-fA-F]+">).*?(</text>)'
+    svg, n = re.subn(pattern, lambda m: m.group(1)+str(label_y)+m.group(2)+xml_escape(value)+m.group(3), svg, count=1)
+    if not n:
+        print(f"Warning: couldn't update weekday count label at x={label_x}")
 
 # Replace each language label/value in its existing five rows. Keep colors/style and update matching donut slices.
 def update_lang_section(items, center_x, row_x, value_x, old_names, old_values, section):
@@ -227,11 +126,3 @@ update_lang_section(code_top,624,744,946,["TypeScript","HTML","JavaScript","CSS"
 for center_x,items,labels_x,values_x in [(136,repo_top,256,474),(624,code_top,744,946)]:
     for i in range(5):
         name=items[i][0] if i<len(items) else "No data"
-        color=COLORS.get(name,FALLBACK[i])
-        y=375+34*i
-        # Set color on row dot and percentage text; safe scoped to the appropriate row vicinity.
-        svg=re.sub(rf'(<circle cx="{labels_x-16}" cy="{y}" r="6" fill=")[^"]+',lambda m:m.group(1)+color,svg,count=1)
-        svg=re.sub(rf'(<text class="num" x="{values_x}" y="{y+5}" text-anchor="end" fill=")[^"]+',lambda m:m.group(1)+color,svg,count=1)
-
-OUTPUT.write_text(svg)
-print(f"Wrote {OUTPUT.name}: contributions={total_contrib}, repos={public_repos}, stars={stars}, followers={followers}")
