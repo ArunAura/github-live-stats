@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Refresh the original SVG dashboard with live GitHub data for ArunAura."""
 import json, os, re, urllib.request, urllib.error
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -147,7 +148,12 @@ svg=replace_text(svg,"Oct 2 - Oct 9",longest_label)
 svg=replace_text(svg,"most active: Sun",f"most active: {most_active}")
 svg=replace_text(svg,"21",len(repos))
 svg=replace_text(svg,"608K",fmt_bytes(sum(code_lang.values())))
-svg=replace_text(svg,"22",public_repos)
+svg = re.sub(
+    r'(<text class="num" x="300" y="602"[^>]*>).*?(</text>)',
+    lambda m: m.group(1) + str(public_repos) + m.group(2),
+    svg,
+    count=1
+)
 svg=replace_text(svg,"126",stars)
 svg=replace_text(svg,"52",followers)
 svg=replace_text(svg,"live from GitHub - updates every day",f"@{USER} - refreshed {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
