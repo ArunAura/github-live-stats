@@ -59,7 +59,7 @@ while True:
     repos.extend(r for r in batch if not r.get("fork") and not r.get("archived"))
     if len(batch)<100: break
     page+=1
-public_repos=profile.get("public_repos",0)
+public_repos = profile.get("public_repos") or len(repos)
 stars=sum(r.get("stargazers_count",0) for r in repos)
 followers=profile.get("followers",0)
 
