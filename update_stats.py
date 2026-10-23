@@ -1,4 +1,99 @@
 #!/usr/bin/env python3
+"""Refresh the original SVG dashboard with live GitHub data for ArunAura."""
+import json, os, re, urllib.request, urllib.error
+from datetime import datetime, timezone
+from pathlib import Path
+
+USER = os.getenv("GITHUB_USERNAME", "ArunAura")
+TOKEN = os.getenv("GH_STATS_TOKEN") or os.getenv("GITHUB_TOKEN")
+ROOT = Path(__file__).resolve().parent
+TEMPLATE = ROOT / "stats-template.svg"
+OUTPUT = ROOT / "github-stats.svg"
+
+if not TOKEN:
+    raise SystemExit("Missing GH_STATS_TOKEN secret. See README.md.")
+
+def request(url, method="GET", data=None):
+    body = json.dumps(data).encode() if data is not None else None
+    req = urllib.request.Request(url, data=body, method=method, headers={
+        "Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json",
+        "User-Agent": "ArunAura-live-stats"
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read().decode())
+    except urllib.error.HTTPError as e:
+        detail=e.read().decode(errors="replace")
+        raise RuntimeError(f"GitHub API returned HTTP {e.code}: {detail[:500]}") from e
+
+def graph(query, variables=None):
+    result=request("https://api.github.com/graphql", "POST", {"query":query,"variables":variables or {}})
+    if result.get("errors"):
+        raise RuntimeError("GitHub GraphQL error: " + json.dumps(result["errors"])[:1000])
+    return result["data"]
+
+def xml_escape(s):
+    return str(s).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
+
+def replace_text(svg, old, new, count=1):
+    # Replace only visible text nodes, preserving the original SVG markup and animation.
+    pattern = r'(?<=>)' + re.escape(str(old)) + r'(?=</text>)'
+    result, n = re.subn(pattern, lambda _: xml_escape(new), svg, count=count)
+    if n == 0:
+        print(f"Warning: couldn't find SVG text value {old!r}")
+    return result
+
+def replace_first(pattern, repl, svg):
+    result,n=re.subn(pattern,repl,svg,count=1)
+    if not n: print(f"Warning: SVG pattern not found: {pattern[:80]}")
+    return result
+
+def replace_at(svg, x, y, new, class_name=None, update_y=None):
+    """Replace one SVG text node by its coordinates, not by a possibly duplicated placeholder."""
+    cls = rf'(?=[^>]*class="{re.escape(class_name)}")' if class_name else ''
+    pattern = rf'(<text\b{cls}[^>]*\bx="{re.escape(str(x))}"[^>]*\by=")[^"]+("[^>]*>).*?(</text>)'
+    def sub(m):
+        opening = m.group(1) + str(update_y if update_y is not None else y) + m.group(2)
+        return opening + xml_escape(new) + m.group(3)
+    result, n = re.subn(pattern, sub, svg, count=1)
+    if not n:
+        print(f"Warning: couldn't update SVG text at x={x}, y={y}")
+    return result
+
+# Basic public profile and repository metrics
+profile=request(f"https://api.github.com/users/{USER}")
+repos=[]
+page=1
+while True:
+    batch=request(f"https://api.github.com/users/{USER}/repos?per_page=100&page={page}&type=owner&sort=updated")
+    if not batch: break
+    repos.extend(r for r in batch if not r.get("fork") and not r.get("archived"))
+    if len(batch)<100: break
+    page+=1
+public_repos=profile.get("public_repos",0)
+stars=sum(r.get("stargazers_count",0) for r in repos)
+followers=profile.get("followers",0)
+
+# Contribution calendar, weekday totals, current streak and longest streak
+query="query($login:String!){ user(login:$login){ contributionsCollection { contributionCalendar { totalContributions weeks { contributionDays { contributionCount date weekday } } } } } }"
+data=graph(query,{"login":USER})
+user=data.get("user")
+if not user: raise RuntimeError(f"GitHub user {USER!r} was not found or isn't visible to this token.")
+calendar=user["contributionsCollection"]["contributionCalendar"]
+total_contrib=calendar["totalContributions"]
+days=[day for week in calendar["weeks"] for day in week["contributionDays"]]
+# GitHub weekday enum: Sunday=0 ... Saturday=6; dashboard labels Monday first.
+weekday_names=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+weekday_counts=[sum(d["contributionCount"] for d in days if d["weekday"]==i) for i in [1,2,3,4,5,6,0]]
+most_active=weekday_names[max(range(7),key=lambda i:weekday_counts[i])] if any(weekday_counts) else "—"
+# Streaks based on days with at least one contribution; include today if active, otherwise count from yesterday.
+by_date={d["date"]:d["contributionCount"] for d in days}
+today=datetime.now(timezone.utc).date()
+from datetime import timedelta
+current=0
+cursor=today
+if by_date.get(cursor.isoformat(),0)==0: cursor-=timedelta(days=1)
 while by_date.get(cursor.isoformat(),0)>0:
     current+=1; cursor-=timedelta(days=1)
 longest=0; run=0; best_start=best_end=None; run_start=None
@@ -127,3 +222,11 @@ update_lang_section(code_top,624,744,946,["TypeScript","HTML","JavaScript","CSS"
 for center_x,items,labels_x,values_x in [(136,repo_top,256,474),(624,code_top,744,946)]:
     for i in range(5):
         name=items[i][0] if i<len(items) else "No data"
+        color=COLORS.get(name,FALLBACK[i])
+        y=375+34*i
+        # Set color on row dot and percentage text; safe scoped to the appropriate row vicinity.
+        svg=re.sub(rf'(<circle cx="{labels_x-16}" cy="{y}" r="6" fill=")[^"]+',lambda m:m.group(1)+color,svg,count=1)
+        svg=re.sub(rf'(<text class="num" x="{values_x}" y="{y+5}" text-anchor="end" fill=")[^"]+',lambda m:m.group(1)+color,svg,count=1)
+
+OUTPUT.write_text(svg)
+print(f"Wrote {OUTPUT.name}: contributions={total_contrib}, repos={public_repos}, stars={stars}, followers={followers}")
