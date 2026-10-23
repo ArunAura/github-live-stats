@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 while by_date.get(cursor.isoformat(),0)>0:
     current+=1; cursor-=timedelta(days=1)
 longest=0; run=0; best_start=best_end=None; run_start=None
