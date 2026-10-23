@@ -64,7 +64,25 @@ stars=sum(r.get("stargazers_count",0) for r in repos)
 followers=profile.get("followers",0)
 
 # Contribution calendar, weekday totals, current streak and longest streak
-query="query($login:String!){ user(login:){ contributionsCollection { contributionCalendar { totalContributions weeks { contributionDays { contributionCount date weekday } } } } } }"
+
+query = f'''query {{
+  user(login: "{USER}") {{
+    contributionsCollection {{
+      contributionCalendar {{
+        totalContributions
+        weeks {{
+          contributionDays {{
+            contributionCount
+            date
+            weekday
+          }}
+        }}
+      }}
+    }}
+  }}
+}}'''
+data = graph(query)
+
 data=graph(query,{"login":USER})
 user=data.get("user")
 if not user: raise RuntimeError(f"GitHub user {USER!r} was not found or isn't visible to this token.")
